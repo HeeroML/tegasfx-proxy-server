@@ -44,7 +44,7 @@ class ApiKeyEncryption {
 
   encrypt(text) {
     const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipherGCM(this.algorithm, this.key, iv);
+    const cipher = crypto.createCipheriv(this.algorithm, this.key, iv);
     cipher.setAAD(Buffer.from('tegasfx-proxy', 'utf8'));
 
     let encrypted = cipher.update(text, 'utf8', 'hex');
