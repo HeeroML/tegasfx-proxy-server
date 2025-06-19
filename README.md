@@ -48,12 +48,12 @@ npm start
 
 ## Environment Variables
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `PORT` | Server port (default: 3001) | No |
-| `ENCRYPTION_KEY` | 32-character key for API encryption | Yes |
-| `ALLOWED_ORIGINS` | Comma-separated list of allowed origins | No |
-| `NODE_ENV` | Environment (development/production) | No |
+| Variable          | Description                             | Required |
+|-------------------|-----------------------------------------|----------|
+| `PORT`            | Server port (default: 3001)             | No       |
+| `ENCRYPTION_KEY`  | 32-character key for API encryption     | Yes      |
+| `ALLOWED_ORIGINS` | Comma-separated list of allowed origins | No       |
+| `NODE_ENV`        | Environment (development/production)    | No       |
 
 ## API Endpoints
 
