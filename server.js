@@ -35,7 +35,12 @@ class ApiKeyEncryption {
     this.secretKey = process.env.ENCRYPTION_KEY;
 
     if (!this.secretKey) {
-      throw new Error('ENCRYPTION_KEY environment variable is required');
+      // Generate a random 32-character key if not provided
+      this.secretKey = crypto.randomBytes(16).toString('hex');
+      console.warn('⚠️  WARNING: ENCRYPTION_KEY environment variable not set!');
+      console.warn('⚠️  Generated temporary key:', this.secretKey);
+      console.warn('⚠️  For production, set ENCRYPTION_KEY environment variable to a secure 32-character key');
+      console.warn('⚠️  This key must match PROXY_ENCRYPTION_KEY in your Convex deployment');
     }
 
     // Ensure key is 32 bytes for AES-256
