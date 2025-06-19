@@ -1,0 +1,22 @@
+{
+  "name": "TegasFX Proxy Server",
+  "description": "Secure proxy server for TegasFX REST API calls with encrypted API keys",
+  "repository": "https://github.com/HeeroML/tegasfx-proxy-server",
+  "logo": "https://node-js-sample.herokuapp.com/node.png",
+  "keywords": ["node", "express", "proxy", "api"],
+  "env": {
+    "ENCRYPTION_KEY": {
+      "description": "32-character encryption key (must match PROXY_ENCRYPTION_KEY in Convex)",
+      "generator": "secret"
+    },
+    "ALLOWED_ORIGINS": {
+      "description": "Comma-separated list of allowed origins for CORS",
+      "value": "https://decisive-dinosaur-129.convex.site",
+      "required": false
+    },
+    "NODE_ENV": {
+      "description": "Node environment",
+      "value": "production"
+    }
+  }
+}
