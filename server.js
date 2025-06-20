@@ -70,7 +70,7 @@ class ApiKeyEncryption {
         ? JSON.parse(encryptedData) 
         : encryptedData;
 
-      const decipher = crypto.createDecipherGCM(this.algorithm, this.key, Buffer.from(iv, 'hex'));
+      const decipher = crypto.createDecipheriv(this.algorithm, this.key, Buffer.from(iv, 'hex'));
       decipher.setAAD(Buffer.from('tegasfx-proxy', 'utf8'));
       decipher.setAuthTag(Buffer.from(authTag, 'hex'));
 

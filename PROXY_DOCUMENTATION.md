@@ -1,5 +1,9 @@
 # TegasFX Proxy Server - Technical Documentation
 
+## Current Deployment URL
+
+tegasfx-proxy-server-production.up.railway.app
+
 ## Overview
 
 The TegasFX Proxy Server is a secure Node.js/Express middleware that acts as an encrypted bridge between client
