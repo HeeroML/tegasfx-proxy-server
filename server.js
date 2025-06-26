@@ -128,25 +128,15 @@ app.all('/rest/*', async (req, res) => {
     const queryString = req.url.includes('?') ? req.url.split('?')[1] : '';
     const targetUrl = `https://secure.tegasfx.com${targetPath}${queryString ? '?' + queryString : ''}`;
 
-    // Prepare headers for the target API
+    // Prepare headers for the target API - match auth.ts exactly
     const forwardHeaders = {
-      'Content-Type': req.headers['content-type'] || 'application/json',
-      'Authorization': `Bearer ${decryptedApiKey}`,
-      'Accept': req.headers.accept || 'application/json, text/plain, */*',
-      'Accept-Language': req.headers['accept-language'] || 'en-US,en;q=0.9',
-      'User-Agent': req.headers['user-agent'] || 'TegasFX-Proxy/1.0.0'
+      'accept': 'application/json',
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${decryptedApiKey}`
     };
 
-    // Forward cookies from client to TegasFX API
-    if (req.headers.cookie) {
-      forwardHeaders['Cookie'] = req.headers.cookie;
-    }
-
-    // Remove proxy-specific headers
-    delete forwardHeaders['host'];
-    delete forwardHeaders['x-forwarded-for'];
-    delete forwardHeaders['x-forwarded-proto'];
-    delete forwardHeaders['content-length'];
+    // Remove proxy-specific headers that shouldn't be forwarded
+    // Note: We're not forwarding cookies or other headers to match auth.ts behavior
 
     // Prepare request body
     let requestBody = null;
@@ -164,6 +154,7 @@ app.all('/rest/*', async (req, res) => {
       method: req.method,
       headers: forwardHeaders,
       body: requestBody,
+      credentials: 'include', // Match auth.ts behavior
       timeout: 30000 // 30 second timeout
     });
 
