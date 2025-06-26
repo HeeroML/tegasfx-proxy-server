@@ -137,10 +137,16 @@ app.all('/rest/*', async (req, res) => {
       'User-Agent': req.headers['user-agent'] || 'TegasFX-Proxy/1.0.0'
     };
 
+    // Forward cookies from client to TegasFX API
+    if (req.headers.cookie) {
+      forwardHeaders['Cookie'] = req.headers.cookie;
+    }
+
     // Remove proxy-specific headers
     delete forwardHeaders['host'];
     delete forwardHeaders['x-forwarded-for'];
     delete forwardHeaders['x-forwarded-proto'];
+    delete forwardHeaders['content-length'];
 
     // Prepare request body
     let requestBody = null;
