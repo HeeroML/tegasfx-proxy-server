@@ -135,6 +135,10 @@ app.all('/rest/*', async (req, res) => {
       'Authorization': `Bearer ${decryptedApiKey}`
     };
 
+    // Debug logging
+    console.log('Request URL:', targetUrl);
+    console.log('Request Headers:', JSON.stringify(forwardHeaders, null, 2));
+
     // Remove proxy-specific headers that shouldn't be forwarded
     // Note: We're not forwarding cookies or other headers to match auth.ts behavior
 
@@ -154,7 +158,7 @@ app.all('/rest/*', async (req, res) => {
       method: req.method,
       headers: forwardHeaders,
       body: requestBody,
-      credentials: 'include', // Match auth.ts behavior
+      // Note: node-fetch doesn't support credentials like browser fetch
       timeout: 30000 // 30 second timeout
     });
 
