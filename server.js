@@ -89,10 +89,19 @@ const encryption = new ApiKeyEncryption();
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
+  res.json({
+    status: 'healthy',
     timestamp: new Date().toISOString(),
     service: 'tegasfx-proxy'
+  });
+});
+
+// IP address debugging endpoint
+app.get('/ip', (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+  res.json({
+    ip: ip,
+    headers: req.headers
   });
 });
 
