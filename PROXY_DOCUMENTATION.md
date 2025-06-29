@@ -35,66 +35,45 @@ Client Application → TegasFX Proxy → secure.tegasfx.com → TegasFX API
 - **IV**: Random 16-byte initialization vector for each encryption
 - **Auth Tag**: Ensures message integrity and authenticity
 
-**Implementation Details** (server.js:32-86):
+**Implementation Details** (server.js:36-90):
 
 ```javascript
--32 - byte
-key
-derived
-from
-ENCRYPTION_KEY
-environment
-variable
-- Random
-IV
-generation
-for each encryption
-operation
-- AAD
-tag
-"tegasfx-proxy"
-for additional security
-- Full
-decryption
-validation
-with error handling
+- 32-byte key derived from ENCRYPTION_KEY environment variable
+- Random IV generation for each encryption operation
+- AAD tag "tegasfx-proxy" for additional security
+- Full decryption validation with error handling
 ```
 
 #### Request Security
 
-- **Rate Limiting**: 1000 requests per 15 minutes per IP (server.js:19-24)
-- **CORS Protection**: Configurable allowed origins (server.js:13-16)
-- **Helmet Security**: Standard security headers applied (server.js:12)
-- **Input Validation**: Request body size limits (10MB) (server.js:27-29)
+- **Rate Limiting**: 1000 requests per 15 minutes per IP (server.js:23-28)
+- **CORS Protection**: Configurable allowed origins (server.js:17-20)
+- **Helmet Security**: Standard security headers applied (server.js:16)
+- **Input Validation**: Request body size limits (10MB) (server.js:31-33)
+- **Trust Proxy**: Configured to trust first proxy hop for proper IP detection (server.js:13)
 
 ## Header Forwarding Analysis
 
 ### Headers Forwarded to TegasFX API
 
-**Always Forwarded** (server.js:132-138):
+**Always Forwarded** (server.js:145-149):
 
-- `Content-Type`: From client or defaults to `application/json`
+- `accept`: Always set to `application/json`
+- `Content-Type`: Always set to `application/json`
 - `Authorization`: Decrypted API key as `Bearer <key>`
-- `Accept`: From client or defaults to `application/json, text/plain, */*`
-- `Accept-Language`: From client or defaults to `en-US,en;q=0.9`
-- `User-Agent`: From client or defaults to `TegasFX-Proxy/1.0.0`
 
-**Stripped Headers** (server.js:141-143):
-
-- `host`: Removed to prevent routing issues
-- `x-forwarded-for`: Proxy-specific header removed
-- `x-forwarded-proto`: Proxy-specific header removed
+**Note**: The proxy uses a minimal header approach, only forwarding essential headers to match the auth.ts behavior. Client-specific headers like User-Agent, Accept-Language, cookies, and proxy headers are not forwarded to ensure consistency and security.
 
 ### Headers Forwarded from TegasFX API
 
-**All Response Headers Preserved** (server.js:172-176):
+**All Response Headers Preserved** (server.js:186-190):
 
 - **Cookies**: Set-Cookie headers are fully preserved
 - **Content Headers**: Content-Type, Content-Length, etc.
 - **Cache Headers**: Cache-Control, ETag, etc.
 - **Custom Headers**: Any TegasFX-specific headers
 
-**Added Proxy Headers** (server.js:178-181):
+**Added Proxy Headers** (server.js:193-194):
 
 - `X-Proxy-Response-Time`: Request processing time in milliseconds
 - `X-Proxy-Service`: Identifies the proxy service as "tegasfx-proxy"
@@ -178,6 +157,21 @@ Content-Type: application/json
 }
 ```
 
+#### `GET /ip`
+
+**Purpose**: Debug endpoint to check client IP address and headers
+
+**Response**:
+
+```json
+{
+  "ip": "client-ip-address",
+  "headers": {
+    // all request headers
+  }
+}
+```
+
 #### `POST /encrypt-key`
 
 **Purpose**: Utility endpoint for encrypting API keys (testing/setup)
@@ -212,13 +206,13 @@ Content-Type: application/json
 
 ### Processing Details
 
-**Request Processing** (server.js:146-153):
+**Request Processing** (server.js:159-167):
 
 - JSON bodies are re-serialized to ensure valid JSON
 - Non-JSON bodies are forwarded as-is (binary, text, etc.)
 - Content-Type header determines body handling
 
-**Response Processing** (server.js:164-188):
+**Response Processing** (server.js:178-202):
 
 - Response body read as text and forwarded unchanged
 - All response headers copied to client response
