@@ -8,6 +8,21 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Immediately fetch and log the server's public IP on startup
+(async () => {
+  try {
+    const fetch = (await import('node-fetch')).default;
+    const response = await fetch('https://api.ipify.org?format=json');
+    const data = await response.json();
+    console.log('############################################################');
+    console.log(`## My Public IP Address is: ${data.ip}`);
+    console.log('## Use this IP in the Cloudflare WAF rule.');
+    console.log('############################################################');
+  } catch (error) {
+    console.error('Could not fetch public IP address:', error);
+  }
+})();
+
 // Security middleware
 app.use(helmet());
 app.use(cors({
