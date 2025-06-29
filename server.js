@@ -198,6 +198,12 @@ app.all('/rest/*', async (req, res) => {
       res.set(key, value);
     });
 
+    // Log the response being sent back to the client
+    console.log(`📤 Response [${response.status}] to ${req.method} ${req.originalUrl}:`);
+    console.log('Response Headers:', responseHeaders);
+    console.log('Response Body:', responseBody);
+    console.log('---');
+    
     // Send response with original status and body
     res.status(response.status).send(responseBody);
 

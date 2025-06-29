@@ -8,16 +8,21 @@
     "dev": "nodemon server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": ["proxy", "api", "tegasfx", "encryption"],
+  "keywords": [
+    "proxy",
+    "api",
+    "tegasfx",
+    "encryption"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "express": "^4.18.2",
     "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.5",
     "helmet": "^7.1.0",
-    "dotenv": "^16.3.1",
-    "node-fetch": "^3.3.2",
-    "express-rate-limit": "^7.1.5"
+    "node-fetch": "^3.3.2"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
