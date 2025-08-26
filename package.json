@@ -1,6 +1,6 @@
 {
   "name": "tegasfx-proxy",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Secure proxy server for TegasFX API with encrypted API key handling",
   "main": "server.js",
   "scripts": {
