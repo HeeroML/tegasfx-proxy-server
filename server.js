@@ -175,18 +175,35 @@ app.all('/rest/*', async (req, res) => {
       timeout: 30000 // 30 second timeout
     });
 
-    // Get response body
+    // Get response body as text (node-fetch auto-decompresses gzip by default)
     const responseBody = await response.text();
+    const responseBodyBuffer = Buffer.from(responseBody, 'utf8');
+    const responseBodyLength = responseBodyBuffer.byteLength;
     const responseTime = Date.now() - startTime;
 
     // Log the request (without sensitive data)
     console.log(`${new Date().toISOString()} - ${req.method} ${targetPath} - ${response.status} - ${responseTime}ms`);
 
-    // Forward all response headers
+    // Forward response headers, but strip hop-by-hop and encoding-specific headers
     const responseHeaders = {};
+    const hopByHop = new Set([
+      'connection',
+      'keep-alive',
+      'proxy-authenticate',
+      'proxy-authorization',
+      'te',
+      'trailer',
+      'transfer-encoding',
+      'upgrade',
+      // content-specific headers we will manage ourselves
+      'content-encoding',
+      'content-length',
+      'etag'
+    ]);
     response.headers.forEach((value, key) => {
-      // Forward all headers including cookies
-      responseHeaders[key] = value;
+      if (!hopByHop.has(key.toLowerCase())) {
+        responseHeaders[key] = value;
+      }
     });
 
     // Add proxy-specific headers
@@ -197,15 +214,22 @@ app.all('/rest/*', async (req, res) => {
     Object.entries(responseHeaders).forEach(([key, value]) => {
       res.set(key, value);
     });
+    // Ensure correct content type and length for the forwarded (decoded) body
+    if (!res.get('Content-Type')) {
+      res.set('Content-Type', 'application/json; charset=utf-8');
+    }
+    res.set('Content-Length', String(responseBodyLength));
 
     // Log the response being sent back to the client
     console.log(`📤 Response [${response.status}] to ${req.method} ${req.originalUrl}:`);
     console.log('Response Headers:', responseHeaders);
+    console.log('Response Body Length:', responseBodyLength);
     console.log('Response Body:', responseBody);
     console.log('---');
     
     // Send response with original status and body
-    res.status(response.status).send(responseBody);
+    // Use the buffer to match the length header precisely
+    res.status(response.status).send(responseBodyBuffer);
 
   } catch (error) {
     const responseTime = Date.now() - startTime;
