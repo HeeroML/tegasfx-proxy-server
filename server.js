@@ -1,306 +1,112 @@
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const SERVICE_NAME = 'tegasfx-api-gateway';
 
-// Trust the first proxy hop (e.g., Railway's reverse proxy)
-// This is required for express-rate-limit to work correctly.
 app.set('trust proxy', 1);
 
-// Security middleware
-app.use(helmet());
-app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
-  credentials: true
-}));
-
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 1000, // limit each IP to 1000 requests per windowMs
-  message: 'Too many requests from this IP, please try again later.'
-});
-app.use(limiter);
-
-// Body parsing middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.raw({ type: 'application/octet-stream', limit: '10mb' }));
-app.use(express.text({ type: 'text/*', limit: '10mb' }));
-
-// Encryption/Decryption utilities
-class ApiKeyEncryption {
-  constructor() {
-    this.algorithm = 'aes-256-gcm';
-    this.secretKey = process.env.ENCRYPTION_KEY;
-
-    if (!this.secretKey) {
-      // Generate a random 32-character key if not provided
-      this.secretKey = crypto.randomBytes(16).toString('hex');
-      console.warn('⚠️  WARNING: ENCRYPTION_KEY environment variable not set!');
-      console.warn('⚠️  Generated temporary key:', this.secretKey);
-      console.warn('⚠️  For production, set ENCRYPTION_KEY environment variable to a secure 32-character key');
-      console.warn('⚠️  This key must match PROXY_ENCRYPTION_KEY in your Convex deployment');
-    }
-
-    // Ensure key is 32 bytes for AES-256
-    this.key = crypto.scryptSync(this.secretKey, 'salt', 32);
-  }
-
-  encrypt(text) {
-    const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv(this.algorithm, this.key, iv);
-    cipher.setAAD(Buffer.from('tegasfx-proxy', 'utf8'));
-
-    let encrypted = cipher.update(text, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
-
-    const authTag = cipher.getAuthTag();
-
-    return {
-      encrypted,
-      iv: iv.toString('hex'),
-      authTag: authTag.toString('hex')
-    };
-  }
-
-  decrypt(encryptedData) {
-    try {
-      const { encrypted, iv, authTag } = typeof encryptedData === 'string' 
-        ? JSON.parse(encryptedData) 
-        : encryptedData;
-
-      const decipher = crypto.createDecipheriv(this.algorithm, this.key, Buffer.from(iv, 'hex'));
-      decipher.setAAD(Buffer.from('tegasfx-proxy', 'utf8'));
-      decipher.setAuthTag(Buffer.from(authTag, 'hex'));
-
-      let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-      decrypted += decipher.final('utf8');
-
-      return decrypted;
-    } catch (error) {
-      console.error('Decryption error:', error);
-      throw new Error('Failed to decrypt API key');
-    }
-  }
+function allowedOrigins() {
+  return (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
 }
 
-const encryption = new ApiKeyEncryption();
+app.use(helmet());
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin) return callback(null, false);
+    callback(null, allowedOrigins().includes(origin));
+  },
+  credentials: false
+}));
 
-// Health check endpoint
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: 'rate_limited',
+    message: 'Too many requests, please try again later.'
+  }
+}));
+
+app.use(express.json({ limit: '64kb' }));
+app.use(express.text({ type: 'text/*', limit: '64kb' }));
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    service: 'tegasfx-proxy'
+    service: SERVICE_NAME,
+    crmProxyEnabled: false
   });
 });
 
-// IP address debugging endpoint
 app.get('/ip', (req, res) => {
-  const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+  res.json({ ip: req.ip });
+});
+
+app.get('/', (req, res) => {
   res.json({
-    ip: ip,
-    headers: req.headers
+    service: SERVICE_NAME,
+    status: 'online',
+    crmProxyEnabled: false
   });
 });
 
-// Main proxy handler for /rest/ endpoints
-app.all('/rest/*', async (req, res) => {
-  const startTime = Date.now();
-
-  try {
-    // Extract encrypted API key from Authorization header
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({
-        error: 'Missing or invalid authorization header',
-        message: 'Expected format: Authorization: Bearer <encrypted-api-key>'
-      });
-    }
-
-    const encryptedApiKey = authHeader.substring(7);
-
-    // Decrypt the API key
-    let decryptedApiKey;
-    try {
-      decryptedApiKey = encryption.decrypt(encryptedApiKey);
-    } catch (error) {
-      return res.status(401).json({
-        error: 'Invalid encrypted API key',
-        message: 'Failed to decrypt the provided API key'
-      });
-    }
-
-    // Build target URL
-    const targetPath = req.path;
-    const queryString = req.url.includes('?') ? req.url.split('?')[1] : '';
-    const targetUrl = `https://secure.tegasfx.com${targetPath}${queryString ? '?' + queryString : ''}`;
-
-    // Prepare headers for the target API - match auth.ts exactly
-    const forwardHeaders = {
-      'accept': 'application/json',
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${decryptedApiKey}`
-    };
-
-    // Debug logging
-    console.log('Request URL:', targetUrl);
-    console.log('Request Headers:', JSON.stringify(forwardHeaders, null, 2));
-
-    // Remove proxy-specific headers that shouldn't be forwarded
-    // Note: We're not forwarding cookies or other headers to match auth.ts behavior
-
-    // Prepare request body
-    let requestBody = null;
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      if (req.headers['content-type']?.includes('application/json')) {
-        requestBody = JSON.stringify(req.body);
-      } else {
-        requestBody = req.body;
-      }
-    }
-
-    // Make the request to TegasFX API
-    const fetch = (await import('node-fetch')).default;
-    const response = await fetch(targetUrl, {
-      method: req.method,
-      headers: forwardHeaders,
-      body: requestBody,
-      // Note: node-fetch doesn't support credentials like browser fetch
-      timeout: 30000 // 30 second timeout
-    });
-
-    // Get response body as text (node-fetch auto-decompresses gzip by default)
-    const responseBody = await response.text();
-    const responseBodyBuffer = Buffer.from(responseBody, 'utf8');
-    const responseBodyLength = responseBodyBuffer.byteLength;
-    const responseTime = Date.now() - startTime;
-
-    // Log the request (without sensitive data)
-    console.log(`${new Date().toISOString()} - ${req.method} ${targetPath} - ${response.status} - ${responseTime}ms`);
-
-    // Forward response headers, but strip hop-by-hop and encoding-specific headers
-    const responseHeaders = {};
-    const hopByHop = new Set([
-      'connection',
-      'keep-alive',
-      'proxy-authenticate',
-      'proxy-authorization',
-      'te',
-      'trailer',
-      'transfer-encoding',
-      'upgrade',
-      // content-specific headers we will manage ourselves
-      'content-encoding',
-      'content-length',
-      'etag'
-    ]);
-    response.headers.forEach((value, key) => {
-      if (!hopByHop.has(key.toLowerCase())) {
-        responseHeaders[key] = value;
-      }
-    });
-
-    // Add proxy-specific headers
-    responseHeaders['X-Proxy-Response-Time'] = `${responseTime}ms`;
-    responseHeaders['X-Proxy-Service'] = 'tegasfx-proxy';
-
-    // Set response headers
-    Object.entries(responseHeaders).forEach(([key, value]) => {
-      res.set(key, value);
-    });
-    // Ensure correct content type and length for the forwarded (decoded) body
-    if (!res.get('Content-Type')) {
-      res.set('Content-Type', 'application/json; charset=utf-8');
-    }
-    res.set('Content-Length', String(responseBodyLength));
-
-    // Log the response being sent back to the client
-    console.log(`📤 Response [${response.status}] to ${req.method} ${req.originalUrl}:`);
-    console.log('Response Headers:', responseHeaders);
-    console.log('Response Body Length:', responseBodyLength);
-    console.log('Response Body:', responseBody);
-    console.log('---');
-    
-    // Send response with original status and body
-    // Use the buffer to match the length header precisely
-    res.status(response.status).send(responseBodyBuffer);
-
-  } catch (error) {
-    const responseTime = Date.now() - startTime;
-
-    console.error('Proxy error:', {
-      error: error.message,
-      path: req.path,
-      method: req.method,
-      responseTime: `${responseTime}ms`,
-      timestamp: new Date().toISOString()
-    });
-
-    res.status(502).json({
-      error: 'Proxy Gateway Error',
-      message: 'Failed to forward request to TegasFX API',
-      timestamp: new Date().toISOString(),
-      requestId: crypto.randomBytes(8).toString('hex')
-    });
-  }
-});
-
-// Encryption utility endpoint (for testing/setup)
-app.post('/encrypt-key', (req, res) => {
-  try {
-    const { apiKey } = req.body;
-
-    if (!apiKey) {
-      return res.status(400).json({
-        error: 'Missing API key',
-        message: 'Provide apiKey in request body'
-      });
-    }
-
-    const encrypted = encryption.encrypt(apiKey);
-
-    res.json({
-      encryptedApiKey: JSON.stringify(encrypted),
-      message: 'API key encrypted successfully'
-    });
-  } catch (error) {
-    res.status(500).json({
-      error: 'Encryption failed',
-      message: error.message
-    });
-  }
-});
-
-// Catch-all for unsupported endpoints
-app.all('*', (req, res) => {
-  res.status(404).json({
-    error: 'Endpoint not found',
-    message: 'This proxy only supports /rest/* endpoints',
-    supportedPaths: ['/rest/*', '/health', '/encrypt-key']
-  });
-});
-
-// Error handling middleware
-app.use((error, req, res, next) => {
-  console.error('Unhandled error:', error);
-  res.status(500).json({
-    error: 'Internal Server Error',
-    message: 'An unexpected error occurred',
+function crmProxyDisabled(req, res) {
+  console.warn('Blocked disabled CRM proxy request', {
+    method: req.method,
+    path: req.originalUrl,
+    ip: req.ip,
     timestamp: new Date().toISOString()
   });
+
+  res.status(410).json({
+    error: 'crm_proxy_disabled',
+    message: 'The TegasFX CRM REST proxy has been permanently disabled.'
+  });
+}
+
+app.all('/rest', crmProxyDisabled);
+app.all('/rest/*', crmProxyDisabled);
+app.all('/encrypt-key', crmProxyDisabled);
+
+app.all('*', (req, res) => {
+  res.status(404).json({
+    error: 'endpoint_not_found',
+    message: 'This service no longer exposes TegasFX CRM REST proxy endpoints.',
+    supportedPaths: ['/health', '/ip']
+  });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`TegasFX Proxy Server running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+app.use((error, req, res, next) => {
+  console.error('Unhandled error:', {
+    message: error.message,
+    path: req.originalUrl,
+    method: req.method,
+    timestamp: new Date().toISOString()
+  });
+
+  res.status(500).json({
+    error: 'internal_server_error',
+    message: 'An unexpected error occurred.'
+  });
 });
+
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`${SERVICE_NAME} running on port ${PORT}`);
+    console.log(`Health check: http://localhost:${PORT}/health`);
+    console.log('CRM REST proxy endpoints are disabled.');
+  });
+}
 
 module.exports = app;
