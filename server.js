@@ -273,6 +273,7 @@ function buildWithdrawalPayload(body) {
   const currency = getRequiredString(body, 'currency')?.toUpperCase();
   const vendorTransactionId = getRequiredString(body, 'vendorTransactionId');
   const type = getRequiredString(body, 'type');
+  const feeKind = getRequiredString(body, 'feeKind');
   const amount = getPositiveNumber(body, 'amount');
   const psp = getPositiveNumber(body, 'psp');
   const pspDetail = getPositiveNumber(body, 'pspDetail');
@@ -312,6 +313,9 @@ function buildWithdrawalPayload(body) {
   if (type && type !== 'withdrawal') {
     throw Object.assign(new Error('type must be withdrawal'), { status: 400 });
   }
+  if (!feeKind || !allowedWithdrawalFeeKinds().has(feeKind)) {
+    throw Object.assign(new Error('feeKind is not allowed for license withdrawals'), { status: 400 });
+  }
 
   const payload = {
     sid,
@@ -325,10 +329,10 @@ function buildWithdrawalPayload(body) {
   if (pspDetail !== null) payload.pspDetail = pspDetail;
   if (comment) payload.comment = comment;
   if (mt4Comment) payload.mt4Comment = mt4Comment;
-  return { userId, payload };
+  return { userId, payload, feeKind };
 }
 
-function assertWithdrawalAssertionMatches(req, userId, payload) {
+function assertWithdrawalAssertionMatches(req, userId, payload, feeKind) {
   const claims = parseWithdrawalAssertion(req);
 
   const expected = {
@@ -340,6 +344,7 @@ function assertWithdrawalAssertionMatches(req, userId, payload) {
     currency: payload.currency,
     psp: payload.psp,
     vendorTransactionId: payload.vendorTransactionId,
+    feeKind,
     feeAmount: payload.amount,
     feeCurrency: payload.currency
   };
@@ -363,8 +368,8 @@ app.post('/api/v1/license/withdrawals/new', async (req, res, next) => {
     const token = assertLicenseKey(req, res);
     if (!token) return;
 
-    const { userId, payload } = buildWithdrawalPayload(req.body || {});
-    assertWithdrawalAssertionMatches(req, userId, payload);
+    const { userId, payload, feeKind } = buildWithdrawalPayload(req.body || {});
+    assertWithdrawalAssertionMatches(req, userId, payload, feeKind);
     const upstreamBaseUrl = (process.env.TEGASFX_API_BASE_URL || 'https://secure.tegasfx.com').replace(/\/+$/, '');
     const headers = {
       Accept: 'application/json',

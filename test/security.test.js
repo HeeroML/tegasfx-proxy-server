@@ -103,6 +103,7 @@ const validWithdrawalBody = {
   currency: 'USD',
   psp: 35,
   vendorTransactionId: 'tx_123',
+  feeKind: 'license_purchase',
   type: 'withdrawal'
 };
 
@@ -315,6 +316,48 @@ test('license withdrawal assertion must match the request body', async () => {
     );
     assert.equal(genericResponse.status, 401);
     assert.equal(genericResponse.body.error, 'invalid_withdrawal_assertion');
+  } finally {
+    server.close();
+    process.env.LICENSE_APP_API_KEY = previousKey;
+    process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = previousSecret;
+  }
+});
+
+test('license withdrawal endpoint requires an allowed fee kind bound to the assertion', async () => {
+  const previousKey = process.env.LICENSE_APP_API_KEY;
+  const previousSecret = process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET;
+  process.env.LICENSE_APP_API_KEY = 'license-secret';
+  process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = 'assertion-secret';
+  const server = app.listen(0);
+  try {
+    const missingFeeKind = await requestWithHeaders(
+      server,
+      'POST',
+      '/api/v1/license/withdrawals/new',
+      { ...validWithdrawalBody, feeKind: undefined },
+      {
+        Authorization: 'Bearer license-secret',
+        'x-tegas-withdrawal-assertion': signWithdrawalAssertion('assertion-secret', withdrawalClaims())
+      }
+    );
+    assert.equal(missingFeeKind.status, 400);
+    assert.equal(missingFeeKind.body.error, 'invalid_withdrawal_request');
+
+    const mismatchedFeeKind = await requestWithHeaders(
+      server,
+      'POST',
+      '/api/v1/license/withdrawals/new',
+      validWithdrawalBody,
+      {
+        Authorization: 'Bearer license-secret',
+        'x-tegas-withdrawal-assertion': signWithdrawalAssertion(
+          'assertion-secret',
+          withdrawalClaims({ feeKind: 'sales_booster_purchase' })
+        )
+      }
+    );
+    assert.equal(mismatchedFeeKind.status, 401);
+    assert.equal(mismatchedFeeKind.body.error, 'withdrawal_assertion_mismatch');
   } finally {
     server.close();
     process.env.LICENSE_APP_API_KEY = previousKey;
