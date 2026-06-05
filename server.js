@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
+const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
@@ -53,6 +54,198 @@ app.get('/ip', (req, res) => {
   res.json({ ip: req.ip });
 });
 
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function timingSafeEqual(left, right) {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  if (leftBuffer.length !== rightBuffer.length) return false;
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function getBearerToken(req) {
+  const authorization = req.get('authorization');
+  if (!authorization || !authorization.toLowerCase().startsWith('bearer ')) {
+    return null;
+  }
+  const token = authorization.slice('bearer '.length).trim();
+  return token || null;
+}
+
+function assertLicenseKey(req, res) {
+  const token = getBearerToken(req);
+  if (!token) {
+    res.status(401).json({
+      error: 'missing_api_key',
+      message: 'Authorization: Bearer API key is required'
+    });
+    return null;
+  }
+
+  const expectedHash =
+    process.env.LICENSE_APP_API_KEY_HASH ||
+    (process.env.LICENSE_APP_API_KEY ? sha256(process.env.LICENSE_APP_API_KEY) : '');
+
+  if (!expectedHash) {
+    res.status(500).json({
+      error: 'license_app_key_not_configured',
+      message: 'License app API key is not configured.'
+    });
+    return null;
+  }
+
+  if (!timingSafeEqual(sha256(token), expectedHash)) {
+    res.status(401).json({
+      error: 'invalid_api_key',
+      message: 'API key is invalid'
+    });
+    return null;
+  }
+
+  return token;
+}
+
+function getPositiveNumber(body, key) {
+  const value = body[key];
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function getRequiredString(body, key) {
+  const value = body[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function blockedUserIds() {
+  return (process.env.BLOCKED_USER_IDS || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+}
+
+function allowedWithdrawalCurrencies() {
+  return new Set(
+    (process.env.LICENSE_APP_WITHDRAWAL_CURRENCIES || 'USD,EUR')
+      .split(',')
+      .map((currency) => currency.trim().toUpperCase())
+      .filter(Boolean)
+  );
+}
+
+function allowedWithdrawalPsps() {
+  return new Set(
+    (process.env.LICENSE_APP_WITHDRAWAL_PSPS || '35')
+      .split(',')
+      .map((value) => Number(value.trim()))
+      .filter((value) => Number.isInteger(value) && value > 0)
+  );
+}
+
+function buildWithdrawalPayload(body) {
+  const userId = String(body.userId ?? body.user_id ?? '').trim();
+  const sid = getRequiredString(body, 'sid');
+  const login = getRequiredString(body, 'login');
+  const currency = getRequiredString(body, 'currency')?.toUpperCase();
+  const vendorTransactionId = getRequiredString(body, 'vendorTransactionId');
+  const type = getRequiredString(body, 'type');
+  const amount = getPositiveNumber(body, 'amount');
+  const psp = getPositiveNumber(body, 'psp');
+  const pspDetail = getPositiveNumber(body, 'pspDetail');
+  const comment = getRequiredString(body, 'comment');
+  const mt4Comment = getRequiredString(body, 'mt4Comment');
+  const maxAmount = process.env.LICENSE_APP_MAX_WITHDRAWAL_AMOUNT
+    ? Number(process.env.LICENSE_APP_MAX_WITHDRAWAL_AMOUNT)
+    : null;
+
+  if (!/^\d+$/.test(userId)) {
+    throw Object.assign(new Error('A positive userId is required'), { status: 400 });
+  }
+  if (blockedUserIds().includes(userId)) {
+    throw Object.assign(new Error('Access denied for this user'), { status: 403 });
+  }
+  if (!sid || !login || !currency || !vendorTransactionId) {
+    throw Object.assign(new Error('sid, login, currency, and vendorTransactionId are required'), { status: 400 });
+  }
+  if (!amount) {
+    throw Object.assign(new Error('amount must be positive'), { status: 400 });
+  }
+  if (maxAmount && Number.isFinite(maxAmount) && amount > maxAmount) {
+    throw Object.assign(new Error('amount exceeds the configured license withdrawal limit'), { status: 400 });
+  }
+  if (!psp || !Number.isInteger(psp)) {
+    throw Object.assign(new Error('psp must be a positive integer'), { status: 400 });
+  }
+  if (!allowedWithdrawalPsps().has(psp)) {
+    throw Object.assign(new Error('psp is not allowed for license withdrawals'), { status: 400 });
+  }
+  if (!allowedWithdrawalCurrencies().has(currency)) {
+    throw Object.assign(new Error('currency is not allowed for license withdrawals'), { status: 400 });
+  }
+  if (pspDetail !== null && !Number.isInteger(pspDetail)) {
+    throw Object.assign(new Error('pspDetail must be a positive integer when provided'), { status: 400 });
+  }
+  if (type && type !== 'withdrawal') {
+    throw Object.assign(new Error('type must be withdrawal'), { status: 400 });
+  }
+
+  const payload = {
+    sid,
+    login,
+    amount,
+    currency,
+    psp,
+    vendorTransactionId,
+    type: 'withdrawal'
+  };
+  if (pspDetail !== null) payload.pspDetail = pspDetail;
+  if (comment) payload.comment = comment;
+  if (mt4Comment) payload.mt4Comment = mt4Comment;
+  return payload;
+}
+
+app.post('/api/v1/license/withdrawals/new', async (req, res, next) => {
+  try {
+    const token = assertLicenseKey(req, res);
+    if (!token) return;
+
+    const payload = buildWithdrawalPayload(req.body || {});
+    const upstreamBaseUrl = (process.env.TEGASFX_API_BASE_URL || 'https://secure.tegasfx.com').replace(/\/+$/, '');
+    const headers = {
+      Accept: 'application/json',
+      'Accept-Encoding': 'identity',
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`
+    };
+    if (req.get('x-api-key')) headers['x-api-key'] = req.get('x-api-key');
+    if (req.get('x-tegas-env')) headers['x-tegas-env'] = req.get('x-tegas-env');
+    if (req.get('x-tegas-app')) headers['x-tegas-app'] = req.get('x-tegas-app');
+
+    const response = await fetch(`${upstreamBaseUrl}/rest/transactions/withdrawals/new`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      redirect: 'manual'
+    });
+
+    const text = await response.text();
+    res.status(response.status);
+    res.type(response.headers.get('content-type') || 'application/json');
+    res.set('Cache-Control', 'no-store');
+    res.send(text);
+  } catch (error) {
+    if (error.status) {
+      res.status(error.status).json({
+        error: error.status === 403 ? 'user_blocked' : 'invalid_withdrawal_request',
+        message: error.message
+      });
+      return;
+    }
+    next(error);
+  }
+});
+
 app.get('/', (req, res) => {
   res.json({
     service: SERVICE_NAME,
@@ -83,7 +276,7 @@ app.all('*', (req, res) => {
   res.status(404).json({
     error: 'endpoint_not_found',
     message: 'This service no longer exposes TegasFX CRM REST proxy endpoints.',
-    supportedPaths: ['/health', '/ip']
+    supportedPaths: ['/health', '/ip', '/api/v1/license/withdrawals/new']
   });
 });
 
