@@ -4,6 +4,37 @@ const http = require('node:http');
 const test = require('node:test');
 const app = require('../server');
 
+test.afterEach(() => {
+  app.resetReplayGuardsForTests();
+});
+
+class FakeReplayRedis {
+  constructor() {
+    this.status = 'ready';
+    this.usedKeys = new Set();
+  }
+
+  async connect() {}
+
+  async set(key) {
+    if (this.usedKeys.has(key)) return null;
+    this.usedKeys.add(key);
+    return 'OK';
+  }
+}
+
+class FailingRedis {
+  constructor() {
+    this.status = 'ready';
+  }
+
+  async connect() {}
+
+  async set() {
+    throw new Error('redis down');
+  }
+}
+
 function request(server, method, path, body) {
   return new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : undefined;
@@ -424,6 +455,84 @@ test('license withdrawal assertion cannot be replayed', async () => {
     assert.equal(replay.status, 401);
     assert.equal(replay.body.error, 'replayed_withdrawal_assertion');
     assert.equal(calls.length, 1);
+  } finally {
+    server.close();
+    global.fetch = previousFetch;
+    process.env.LICENSE_APP_API_KEY = previousKey;
+    process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = previousSecret;
+  }
+});
+
+test('license withdrawal replay guard uses Redis when configured', async () => {
+  const previousKey = process.env.LICENSE_APP_API_KEY;
+  const previousSecret = process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET;
+  process.env.LICENSE_APP_API_KEY = 'license-secret';
+  process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = 'assertion-secret';
+  app.setRedisClientForTests(new FakeReplayRedis());
+  const calls = [];
+  const previousFetch = global.fetch;
+  global.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ id: `wd_${calls.length}`, ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+
+  const assertion = signWithdrawalAssertion('assertion-secret', withdrawalClaims());
+  const server = app.listen(0);
+  try {
+    const headers = {
+      Authorization: 'Bearer license-secret',
+      'x-tegas-withdrawal-assertion': assertion
+    };
+    const first = await requestWithHeaders(server, 'POST', '/api/v1/license/withdrawals/new', validWithdrawalBody, headers);
+    const replay = await requestWithHeaders(server, 'POST', '/api/v1/license/withdrawals/new', validWithdrawalBody, headers);
+
+    assert.equal(first.status, 200);
+    assert.equal(replay.status, 401);
+    assert.equal(replay.body.error, 'replayed_withdrawal_assertion');
+    assert.equal(calls.length, 1);
+  } finally {
+    server.close();
+    global.fetch = previousFetch;
+    process.env.LICENSE_APP_API_KEY = previousKey;
+    process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = previousSecret;
+  }
+});
+
+test('license withdrawal replay guard fails closed when configured Redis is unavailable', async () => {
+  const previousKey = process.env.LICENSE_APP_API_KEY;
+  const previousSecret = process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET;
+  process.env.LICENSE_APP_API_KEY = 'license-secret';
+  process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = 'assertion-secret';
+  app.setRedisClientForTests(new FailingRedis());
+  const calls = [];
+  const previousFetch = global.fetch;
+  global.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ id: 'wd_123', ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+
+  const server = app.listen(0);
+  try {
+    const response = await requestWithHeaders(
+      server,
+      'POST',
+      '/api/v1/license/withdrawals/new',
+      validWithdrawalBody,
+      {
+        Authorization: 'Bearer license-secret',
+        'x-tegas-withdrawal-assertion': signWithdrawalAssertion('assertion-secret', withdrawalClaims())
+      }
+    );
+
+    assert.equal(response.status, 503);
+    assert.equal(response.body.error, 'withdrawal_replay_guard_unavailable');
+    assert.equal(calls.length, 0);
   } finally {
     server.close();
     global.fetch = previousFetch;

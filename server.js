@@ -3,12 +3,14 @@ const cors = require('cors');
 const helmet = require('helmet');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
+const Redis = require('ioredis');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const SERVICE_NAME = 'tegasfx-api-gateway';
 const usedWithdrawalAssertionIds = new Map();
+let redisClient;
 
 app.set('trust proxy', 1);
 
@@ -87,8 +89,54 @@ function signJwtInput(input, secret) {
   return crypto.createHmac('sha256', secret).update(input).digest('base64url');
 }
 
-function assertWithdrawalAssertionNotReplayed(jti, exp) {
+function getRedisClient() {
+  if (redisClient !== undefined) return redisClient;
+
+  const url = String(process.env.REDIS_URL || '').trim();
+  if (!url) {
+    redisClient = null;
+    return redisClient;
+  }
+
+  redisClient = new Redis(url, {
+    maxRetriesPerRequest: 2,
+    enableReadyCheck: false,
+    lazyConnect: true
+  });
+  redisClient.on('error', (error) => {
+    console.warn('Redis connection error:', error.message);
+  });
+  return redisClient;
+}
+
+async function assertWithdrawalAssertionNotReplayed(jti, exp) {
   const now = Math.floor(Date.now() / 1000);
+  const ttlSeconds = Math.max(1, exp - now);
+  const redis = getRedisClient();
+
+  if (redis) {
+    try {
+      if (redis.status === 'wait') {
+        await redis.connect();
+      }
+
+      const result = await redis.set(`license-withdrawal:jti:${jti}`, '1', 'EX', ttlSeconds, 'NX');
+      if (result !== 'OK') {
+        throw Object.assign(new Error('Withdrawal assertion token id was already used'), {
+          status: 401,
+          code: 'replayed_withdrawal_assertion'
+        });
+      }
+      return;
+    } catch (error) {
+      if (error.status) throw error;
+      throw Object.assign(new Error('Withdrawal replay guard is unavailable'), {
+        status: 503,
+        code: 'withdrawal_replay_guard_unavailable'
+      });
+    }
+  }
+
   for (const [usedJti, expiresAt] of usedWithdrawalAssertionIds.entries()) {
     if (expiresAt < now) {
       usedWithdrawalAssertionIds.delete(usedJti);
@@ -359,7 +407,7 @@ function buildWithdrawalPayload(body) {
   return { userId, payload, feeKind };
 }
 
-function assertWithdrawalAssertionMatches(req, userId, payload, feeKind) {
+async function assertWithdrawalAssertionMatches(req, userId, payload, feeKind) {
   const claims = parseWithdrawalAssertion(req);
 
   const expected = {
@@ -389,7 +437,7 @@ function assertWithdrawalAssertionMatches(req, userId, payload, feeKind) {
     });
   }
 
-  assertWithdrawalAssertionNotReplayed(claims.jti.trim(), claims.exp);
+  await assertWithdrawalAssertionNotReplayed(claims.jti.trim(), claims.exp);
 }
 
 app.post('/api/v1/license/withdrawals/new', async (req, res, next) => {
@@ -398,7 +446,7 @@ app.post('/api/v1/license/withdrawals/new', async (req, res, next) => {
     if (!token) return;
 
     const { userId, payload, feeKind } = buildWithdrawalPayload(req.body || {});
-    assertWithdrawalAssertionMatches(req, userId, payload, feeKind);
+    await assertWithdrawalAssertionMatches(req, userId, payload, feeKind);
     const upstreamBaseUrl = (process.env.TEGASFX_API_BASE_URL || 'https://secure.tegasfx.com').replace(/\/+$/, '');
     const headers = {
       Accept: 'application/json',
@@ -491,3 +539,10 @@ if (require.main === module) {
 }
 
 module.exports = app;
+module.exports.setRedisClientForTests = (client) => {
+  redisClient = client;
+};
+module.exports.resetReplayGuardsForTests = () => {
+  usedWithdrawalAssertionIds.clear();
+  redisClient = undefined;
+};
