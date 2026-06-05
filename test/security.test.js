@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const http = require('node:http');
 const test = require('node:test');
 const app = require('../server');
@@ -72,6 +73,53 @@ function requestWithHeaders(server, method, path, body, headers = {}) {
   });
 }
 
+function base64UrlJson(value) {
+  return Buffer.from(JSON.stringify(value)).toString('base64url');
+}
+
+function signWithdrawalAssertion(secret, claims) {
+  const now = Math.floor(Date.now() / 1000);
+  const header = base64UrlJson({ alg: 'HS256', typ: 'JWT' });
+  const payload = base64UrlJson({
+    iss: 'tegas-license',
+    aud: 'tegasfx-license-withdrawal',
+    purpose: 'license_withdrawal',
+    iat: now,
+    exp: now + 120,
+    ...claims
+  });
+  const signature = crypto
+    .createHmac('sha256', secret)
+    .update(`${header}.${payload}`)
+    .digest('base64url');
+  return `${header}.${payload}.${signature}`;
+}
+
+const validWithdrawalBody = {
+  userId: 123,
+  sid: 'wallet-sid',
+  login: '900001',
+  amount: 12.34,
+  currency: 'USD',
+  psp: 35,
+  vendorTransactionId: 'tx_123',
+  type: 'withdrawal'
+};
+
+function withdrawalClaims(overrides = {}) {
+  return {
+    sub: '123',
+    userId: 123,
+    sid: 'wallet-sid',
+    login: '900001',
+    amount: 12.34,
+    currency: 'USD',
+    psp: 35,
+    vendorTransactionId: 'tx_123',
+    ...overrides
+  };
+}
+
 test('dangerous legacy CRM endpoints are permanently disabled', async () => {
   const server = app.listen(0);
   try {
@@ -133,16 +181,7 @@ test('license withdrawal endpoint forwards only the fixed withdrawal route', asy
       server,
       'POST',
       '/api/v1/license/withdrawals/new',
-      {
-        userId: 123,
-        sid: 'wallet-sid',
-        login: '900001',
-        amount: 12.34,
-        currency: 'USD',
-        psp: 35,
-        vendorTransactionId: 'tx_123',
-        type: 'withdrawal'
-      },
+      validWithdrawalBody,
       { Authorization: 'Bearer license-secret' }
     );
     assert.equal(response.status, 200);
@@ -163,6 +202,94 @@ test('license withdrawal endpoint forwards only the fixed withdrawal route', asy
     global.fetch = previousFetch;
     process.env.LICENSE_APP_API_KEY = previousKey;
     process.env.BLOCKED_USER_IDS = previousBlocked;
+  }
+});
+
+test('license withdrawal assertion is required when configured', async () => {
+  const previousKey = process.env.LICENSE_APP_API_KEY;
+  const previousSecret = process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET;
+  process.env.LICENSE_APP_API_KEY = 'license-secret';
+  process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = 'assertion-secret';
+  const server = app.listen(0);
+  try {
+    const response = await requestWithHeaders(
+      server,
+      'POST',
+      '/api/v1/license/withdrawals/new',
+      validWithdrawalBody,
+      { Authorization: 'Bearer license-secret' }
+    );
+    assert.equal(response.status, 401);
+    assert.equal(response.body.error, 'missing_withdrawal_assertion');
+  } finally {
+    server.close();
+    process.env.LICENSE_APP_API_KEY = previousKey;
+    process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = previousSecret;
+  }
+});
+
+test('license withdrawal assertion must match the request body', async () => {
+  const previousKey = process.env.LICENSE_APP_API_KEY;
+  const previousSecret = process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET;
+  process.env.LICENSE_APP_API_KEY = 'license-secret';
+  process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = 'assertion-secret';
+  const server = app.listen(0);
+  try {
+    const assertion = signWithdrawalAssertion('assertion-secret', withdrawalClaims({ userId: 456, sub: '456' }));
+    const response = await requestWithHeaders(
+      server,
+      'POST',
+      '/api/v1/license/withdrawals/new',
+      validWithdrawalBody,
+      {
+        Authorization: 'Bearer license-secret',
+        'x-tegas-withdrawal-assertion': assertion
+      }
+    );
+    assert.equal(response.status, 401);
+    assert.equal(response.body.error, 'withdrawal_assertion_mismatch');
+  } finally {
+    server.close();
+    process.env.LICENSE_APP_API_KEY = previousKey;
+    process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = previousSecret;
+  }
+});
+
+test('license withdrawal endpoint accepts a matching short-lived assertion', async () => {
+  const previousKey = process.env.LICENSE_APP_API_KEY;
+  const previousSecret = process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET;
+  process.env.LICENSE_APP_API_KEY = 'license-secret';
+  process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = 'assertion-secret';
+  const calls = [];
+  const previousFetch = global.fetch;
+  global.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ id: 'wd_123', ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+
+  const server = app.listen(0);
+  try {
+    const assertion = signWithdrawalAssertion('assertion-secret', withdrawalClaims());
+    const response = await requestWithHeaders(
+      server,
+      'POST',
+      '/api/v1/license/withdrawals/new',
+      validWithdrawalBody,
+      {
+        Authorization: 'Bearer license-secret',
+        'x-tegas-withdrawal-assertion': assertion
+      }
+    );
+    assert.equal(response.status, 200);
+    assert.equal(calls.length, 1);
+  } finally {
+    server.close();
+    global.fetch = previousFetch;
+    process.env.LICENSE_APP_API_KEY = previousKey;
+    process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = previousSecret;
   }
 });
 

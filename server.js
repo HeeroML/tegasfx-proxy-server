@@ -65,6 +65,95 @@ function timingSafeEqual(left, right) {
   return crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }
 
+function base64UrlDecode(value) {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized.padEnd(
+    normalized.length + ((4 - (normalized.length % 4)) % 4),
+    '='
+  );
+  return Buffer.from(padded, 'base64').toString('utf8');
+}
+
+function withdrawalAssertionSecret() {
+  return (
+    process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET ||
+    process.env.TEGAS_CORE_WITHDRAWAL_ASSERTION_SECRET ||
+    ''
+  ).trim();
+}
+
+function signJwtInput(input, secret) {
+  return crypto.createHmac('sha256', secret).update(input).digest('base64url');
+}
+
+function parseWithdrawalAssertion(req) {
+  const secret = withdrawalAssertionSecret();
+  if (!secret) return null;
+
+  const token = String(req.get('x-tegas-withdrawal-assertion') || '').trim();
+  if (!token) {
+    throw Object.assign(new Error('Withdrawal assertion is required'), {
+      status: 401,
+      code: 'missing_withdrawal_assertion'
+    });
+  }
+
+  const parts = token.split('.');
+  if (parts.length !== 3 || parts.some((part) => !part)) {
+    throw Object.assign(new Error('Withdrawal assertion is malformed'), {
+      status: 401,
+      code: 'invalid_withdrawal_assertion'
+    });
+  }
+
+  const [encodedHeader, encodedPayload, signature] = parts;
+  const expected = signJwtInput(`${encodedHeader}.${encodedPayload}`, secret);
+  if (!timingSafeEqual(signature, expected)) {
+    throw Object.assign(new Error('Withdrawal assertion signature is invalid'), {
+      status: 401,
+      code: 'invalid_withdrawal_assertion'
+    });
+  }
+
+  let header;
+  let claims;
+  try {
+    header = JSON.parse(base64UrlDecode(encodedHeader));
+    claims = JSON.parse(base64UrlDecode(encodedPayload));
+  } catch {
+    throw Object.assign(new Error('Withdrawal assertion is invalid JSON'), {
+      status: 401,
+      code: 'invalid_withdrawal_assertion'
+    });
+  }
+
+  if (header.alg !== 'HS256' || header.typ !== 'JWT') {
+    throw Object.assign(new Error('Withdrawal assertion algorithm is not allowed'), {
+      status: 401,
+      code: 'invalid_withdrawal_assertion'
+    });
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const exp = typeof claims.exp === 'number' ? claims.exp : 0;
+  const iat = typeof claims.iat === 'number' ? claims.iat : 0;
+  if (exp < now || iat > now + 30 || exp - iat > 180) {
+    throw Object.assign(new Error('Withdrawal assertion is expired'), {
+      status: 401,
+      code: 'expired_withdrawal_assertion'
+    });
+  }
+
+  if (claims.aud !== 'tegasfx-license-withdrawal' || claims.purpose !== 'license_withdrawal') {
+    throw Object.assign(new Error('Withdrawal assertion purpose is invalid'), {
+      status: 401,
+      code: 'invalid_withdrawal_assertion'
+    });
+  }
+
+  return claims;
+}
+
 function getBearerToken(req) {
   const authorization = req.get('authorization');
   if (!authorization || !authorization.toLowerCase().startsWith('bearer ')) {
@@ -202,7 +291,36 @@ function buildWithdrawalPayload(body) {
   if (pspDetail !== null) payload.pspDetail = pspDetail;
   if (comment) payload.comment = comment;
   if (mt4Comment) payload.mt4Comment = mt4Comment;
-  return payload;
+  return { userId, payload };
+}
+
+function assertWithdrawalAssertionMatches(req, userId, payload) {
+  const claims = parseWithdrawalAssertion(req);
+  if (!claims) return;
+
+  const expected = {
+    sub: userId,
+    userId: Number(userId),
+    sid: payload.sid,
+    login: payload.login,
+    amount: payload.amount,
+    currency: payload.currency,
+    psp: payload.psp,
+    vendorTransactionId: payload.vendorTransactionId
+  };
+  if (payload.pspDetail !== undefined) expected.pspDetail = payload.pspDetail;
+
+  const mismatched = Object.entries(expected).some(([key, value]) => {
+    if (typeof value === 'number') return Number(claims[key]) !== value;
+    return String(claims[key] ?? '') !== String(value);
+  });
+
+  if (mismatched) {
+    throw Object.assign(new Error('Withdrawal assertion does not match the request'), {
+      status: 401,
+      code: 'withdrawal_assertion_mismatch'
+    });
+  }
 }
 
 app.post('/api/v1/license/withdrawals/new', async (req, res, next) => {
@@ -210,7 +328,8 @@ app.post('/api/v1/license/withdrawals/new', async (req, res, next) => {
     const token = assertLicenseKey(req, res);
     if (!token) return;
 
-    const payload = buildWithdrawalPayload(req.body || {});
+    const { userId, payload } = buildWithdrawalPayload(req.body || {});
+    assertWithdrawalAssertionMatches(req, userId, payload);
     const upstreamBaseUrl = (process.env.TEGASFX_API_BASE_URL || 'https://secure.tegasfx.com').replace(/\/+$/, '');
     const headers = {
       Accept: 'application/json',
@@ -237,7 +356,7 @@ app.post('/api/v1/license/withdrawals/new', async (req, res, next) => {
   } catch (error) {
     if (error.status) {
       res.status(error.status).json({
-        error: error.status === 403 ? 'user_blocked' : 'invalid_withdrawal_request',
+        error: error.code || (error.status === 403 ? 'user_blocked' : 'invalid_withdrawal_request'),
         message: error.message
       });
       return;
