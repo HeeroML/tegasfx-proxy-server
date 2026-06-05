@@ -144,8 +144,28 @@ function parseWithdrawalAssertion(req) {
     });
   }
 
-  if (claims.aud !== 'tegasfx-license-withdrawal' || claims.purpose !== 'license_withdrawal') {
+  if (
+    claims.iss !== 'tegas-license' ||
+    claims.aud !== 'tegasfx-license-withdrawal' ||
+    claims.purpose !== 'license_withdrawal'
+  ) {
     throw Object.assign(new Error('Withdrawal assertion purpose is invalid'), {
+      status: 401,
+      code: 'invalid_withdrawal_assertion'
+    });
+  }
+
+  const feeKind = typeof claims.feeKind === 'string' ? claims.feeKind : '';
+  const feeAmount = Number(claims.feeAmount);
+  const feeCurrency =
+    typeof claims.feeCurrency === 'string' ? claims.feeCurrency.toUpperCase() : '';
+  if (
+    !allowedWithdrawalFeeKinds().has(feeKind) ||
+    !Number.isFinite(feeAmount) ||
+    feeAmount <= 0 ||
+    !feeCurrency
+  ) {
+    throw Object.assign(new Error('Withdrawal assertion fee scope is invalid'), {
       status: 401,
       code: 'invalid_withdrawal_assertion'
     });
@@ -232,6 +252,15 @@ function allowedWithdrawalPsps() {
   );
 }
 
+function allowedWithdrawalFeeKinds() {
+  return new Set(
+    (process.env.LICENSE_APP_WITHDRAWAL_FEE_KINDS || 'license_purchase,sales_booster_purchase')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)
+  );
+}
+
 function buildWithdrawalPayload(body) {
   const userId = String(body.userId ?? body.user_id ?? '').trim();
   const sid = getRequiredString(body, 'sid');
@@ -306,7 +335,9 @@ function assertWithdrawalAssertionMatches(req, userId, payload) {
     amount: payload.amount,
     currency: payload.currency,
     psp: payload.psp,
-    vendorTransactionId: payload.vendorTransactionId
+    vendorTransactionId: payload.vendorTransactionId,
+    feeAmount: payload.amount,
+    feeCurrency: payload.currency
   };
   if (payload.pspDetail !== undefined) expected.pspDetail = payload.pspDetail;
 

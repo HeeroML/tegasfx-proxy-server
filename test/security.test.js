@@ -116,6 +116,9 @@ function withdrawalClaims(overrides = {}) {
     currency: 'USD',
     psp: 35,
     vendorTransactionId: 'tx_123',
+    feeKind: 'license_purchase',
+    feeAmount: 12.34,
+    feeCurrency: 'USD',
     ...overrides
   };
 }
@@ -248,6 +251,29 @@ test('license withdrawal assertion must match the request body', async () => {
     );
     assert.equal(response.status, 401);
     assert.equal(response.body.error, 'withdrawal_assertion_mismatch');
+
+    const genericAssertion = signWithdrawalAssertion('assertion-secret', {
+      sub: '123',
+      userId: 123,
+      sid: 'wallet-sid',
+      login: '900001',
+      amount: 12.34,
+      currency: 'USD',
+      psp: 35,
+      vendorTransactionId: 'tx_123'
+    });
+    const genericResponse = await requestWithHeaders(
+      server,
+      'POST',
+      '/api/v1/license/withdrawals/new',
+      validWithdrawalBody,
+      {
+        Authorization: 'Bearer license-secret',
+        'x-tegas-withdrawal-assertion': genericAssertion
+      }
+    );
+    assert.equal(genericResponse.status, 401);
+    assert.equal(genericResponse.body.error, 'invalid_withdrawal_assertion');
   } finally {
     server.close();
     process.env.LICENSE_APP_API_KEY = previousKey;
