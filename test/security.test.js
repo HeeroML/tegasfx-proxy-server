@@ -395,6 +395,43 @@ test('license withdrawal assertion requires a valid token id', async () => {
   }
 });
 
+test('license withdrawal assertion cannot be replayed', async () => {
+  const previousKey = process.env.LICENSE_APP_API_KEY;
+  const previousSecret = process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET;
+  process.env.LICENSE_APP_API_KEY = 'license-secret';
+  process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = 'assertion-secret';
+  const calls = [];
+  const previousFetch = global.fetch;
+  global.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ id: `wd_${calls.length}`, ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+
+  const assertion = signWithdrawalAssertion('assertion-secret', withdrawalClaims());
+  const server = app.listen(0);
+  try {
+    const headers = {
+      Authorization: 'Bearer license-secret',
+      'x-tegas-withdrawal-assertion': assertion
+    };
+    const first = await requestWithHeaders(server, 'POST', '/api/v1/license/withdrawals/new', validWithdrawalBody, headers);
+    const replay = await requestWithHeaders(server, 'POST', '/api/v1/license/withdrawals/new', validWithdrawalBody, headers);
+
+    assert.equal(first.status, 200);
+    assert.equal(replay.status, 401);
+    assert.equal(replay.body.error, 'replayed_withdrawal_assertion');
+    assert.equal(calls.length, 1);
+  } finally {
+    server.close();
+    global.fetch = previousFetch;
+    process.env.LICENSE_APP_API_KEY = previousKey;
+    process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = previousSecret;
+  }
+});
+
 test('license withdrawal endpoint accepts a matching short-lived assertion', async () => {
   const previousKey = process.env.LICENSE_APP_API_KEY;
   const previousSecret = process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET;

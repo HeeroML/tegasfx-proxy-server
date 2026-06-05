@@ -8,6 +8,7 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 const SERVICE_NAME = 'tegasfx-api-gateway';
+const usedWithdrawalAssertionIds = new Map();
 
 app.set('trust proxy', 1);
 
@@ -84,6 +85,24 @@ function withdrawalAssertionSecret() {
 
 function signJwtInput(input, secret) {
   return crypto.createHmac('sha256', secret).update(input).digest('base64url');
+}
+
+function assertWithdrawalAssertionNotReplayed(jti, exp) {
+  const now = Math.floor(Date.now() / 1000);
+  for (const [usedJti, expiresAt] of usedWithdrawalAssertionIds.entries()) {
+    if (expiresAt < now) {
+      usedWithdrawalAssertionIds.delete(usedJti);
+    }
+  }
+
+  if (usedWithdrawalAssertionIds.has(jti)) {
+    throw Object.assign(new Error('Withdrawal assertion token id was already used'), {
+      status: 401,
+      code: 'replayed_withdrawal_assertion'
+    });
+  }
+
+  usedWithdrawalAssertionIds.set(jti, exp);
 }
 
 function parseWithdrawalAssertion(req) {
@@ -369,6 +388,8 @@ function assertWithdrawalAssertionMatches(req, userId, payload, feeKind) {
       code: 'withdrawal_assertion_mismatch'
     });
   }
+
+  assertWithdrawalAssertionNotReplayed(claims.jti.trim(), claims.exp);
 }
 
 app.post('/api/v1/license/withdrawals/new', async (req, res, next) => {
