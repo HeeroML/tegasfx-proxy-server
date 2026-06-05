@@ -160,6 +160,14 @@ function parseWithdrawalAssertion(req) {
     });
   }
 
+  const jti = typeof claims.jti === 'string' ? claims.jti.trim() : '';
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(jti)) {
+    throw Object.assign(new Error('Withdrawal assertion token id is invalid'), {
+      status: 401,
+      code: 'invalid_withdrawal_assertion'
+    });
+  }
+
   const feeKind = typeof claims.feeKind === 'string' ? claims.feeKind : '';
   const feeAmount = Number(claims.feeAmount);
   const feeCurrency =
