@@ -166,8 +166,10 @@ test('license withdrawal endpoint requires the license app key', async () => {
 test('license withdrawal endpoint forwards only the fixed withdrawal route', async () => {
   const previousKey = process.env.LICENSE_APP_API_KEY;
   const previousBlocked = process.env.BLOCKED_USER_IDS;
+  const previousSecret = process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET;
   process.env.LICENSE_APP_API_KEY = 'license-secret';
   process.env.BLOCKED_USER_IDS = '999';
+  process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = 'assertion-secret';
   const calls = [];
   const previousFetch = global.fetch;
   global.fetch = async (url, init) => {
@@ -185,7 +187,10 @@ test('license withdrawal endpoint forwards only the fixed withdrawal route', asy
       'POST',
       '/api/v1/license/withdrawals/new',
       validWithdrawalBody,
-      { Authorization: 'Bearer license-secret' }
+      {
+        Authorization: 'Bearer license-secret',
+        'x-tegas-withdrawal-assertion': signWithdrawalAssertion('assertion-secret', withdrawalClaims())
+      }
     );
     assert.equal(response.status, 200);
     assert.equal(calls.length, 1);
@@ -205,6 +210,42 @@ test('license withdrawal endpoint forwards only the fixed withdrawal route', asy
     global.fetch = previousFetch;
     process.env.LICENSE_APP_API_KEY = previousKey;
     process.env.BLOCKED_USER_IDS = previousBlocked;
+    process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = previousSecret;
+  }
+});
+
+test('license withdrawal endpoint fails closed when assertion secret is missing', async () => {
+  const previousKey = process.env.LICENSE_APP_API_KEY;
+  const previousSecret = process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET;
+  process.env.LICENSE_APP_API_KEY = 'license-secret';
+  delete process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET;
+  const calls = [];
+  const previousFetch = global.fetch;
+  global.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ id: 'wd_123', ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+
+  const server = app.listen(0);
+  try {
+    const response = await requestWithHeaders(
+      server,
+      'POST',
+      '/api/v1/license/withdrawals/new',
+      validWithdrawalBody,
+      { Authorization: 'Bearer license-secret' }
+    );
+    assert.equal(response.status, 500);
+    assert.equal(response.body.error, 'withdrawal_assertion_not_configured');
+    assert.equal(calls.length, 0);
+  } finally {
+    server.close();
+    global.fetch = previousFetch;
+    process.env.LICENSE_APP_API_KEY = previousKey;
+    process.env.LICENSE_APP_WITHDRAWAL_ASSERTION_SECRET = previousSecret;
   }
 });
 

@@ -88,7 +88,12 @@ function signJwtInput(input, secret) {
 
 function parseWithdrawalAssertion(req) {
   const secret = withdrawalAssertionSecret();
-  if (!secret) return null;
+  if (!secret) {
+    throw Object.assign(new Error('Withdrawal assertion verification is not configured'), {
+      status: 500,
+      code: 'withdrawal_assertion_not_configured'
+    });
+  }
 
   const token = String(req.get('x-tegas-withdrawal-assertion') || '').trim();
   if (!token) {
@@ -325,7 +330,6 @@ function buildWithdrawalPayload(body) {
 
 function assertWithdrawalAssertionMatches(req, userId, payload) {
   const claims = parseWithdrawalAssertion(req);
-  if (!claims) return;
 
   const expected = {
     sub: userId,
